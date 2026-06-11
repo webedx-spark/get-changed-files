@@ -1,29 +1,29 @@
 import * as core from '@actions/core'
-import {context, GitHub} from '@actions/github'
+import * as github from '@actions/github'
 import minimatch from 'minimatch'
 
 type Format = 'space-delimited' | 'csv' | 'json'
 type FileStatus = 'added' | 'modified' | 'removed' | 'renamed'
+type Octokit = ReturnType<typeof github.getOctokit>
+type CompareCommitsResponse = Awaited<ReturnType<Octokit['rest']['repos']['compareCommits']>>
+type CompareCommitsFile = NonNullable<CompareCommitsResponse['data']['files']>[number]
 
 async function run(): Promise<void> {
   try {
-    // Create GitHub client with the API token.
-    const client = new GitHub(core.getInput('token', {required: true}))
+    const token = core.getInput('token', {required: true})
+    const client = github.getOctokit(token)
+    const {context} = github
     const format = core.getInput('format', {required: true}) as Format
-    const filter = core.getMultilineInput('filter', {required: true}) || '*'
+    const filter = core.getMultilineInput('filter', {required: true}) || ['*']
 
-    // Ensure that the format parameter is set properly.
     if (format !== 'space-delimited' && format !== 'csv' && format !== 'json') {
-      core.setFailed(`Format must be one of 'string-delimited', 'csv', or 'json', got '${format}'.`)
+      core.setFailed(`Format must be one of 'space-delimited', 'csv', or 'json', got '${format}'.`)
+      return
     }
 
-    // Debug log the payload.
     core.debug(`Payload keys: ${Object.keys(context.payload)}`)
 
-    // Get event name.
     const eventName = context.eventName
-
-    // Define the base and head commits to be extracted from the payload.
     let base: string | undefined
     let head: string | undefined
 
@@ -46,42 +46,44 @@ async function run(): Promise<void> {
           `This action only supports pull requests and pushes, ${context.eventName} events are not supported. ` +
             "Please submit an issue on this action's GitHub repo if you believe this in correct."
         )
+        return
     }
 
-    // Log the base and head commits
     core.info(`Base commit: ${base}`)
     core.info(`Head commit: ${head}`)
 
-    // Ensure that the base and head properties are set on the payload.
     if (!base || !head) {
       core.setFailed(
         `The base and head commits are missing from the payload for this ${context.eventName} event. ` +
           "Please submit an issue on this action's GitHub repo."
       )
-
-      // To satisfy TypeScript, even though this is unreachable.
-      base = ''
-      head = ''
+      return
     }
 
-    // Use GitHub's compare two commits API.
-    // https://developer.github.com/v3/repos/commits/#compare-two-commits
-    const response = await client.repos.compareCommits({
+    const response = await client.rest.repos.compareCommits({
       base,
       head,
       owner: context.repo.owner,
       repo: context.repo.repo
     })
 
-    // Ensure that the request was successful.
     if (response.status !== 200) {
       core.setFailed(
         `The GitHub API for comparing the base and head commits for this ${context.eventName} event returned ${response.status}, expected 200. ` +
           "Please submit an issue on this action's GitHub repo."
       )
+      return
     }
 
-    const files = response.data.files.filter(file => {
+    if (!response.data.files) {
+      core.setFailed(
+        `The GitHub API for comparing the base and head commits for this ${context.eventName} event returned no files. ` +
+          "Please submit an issue on this action's GitHub repo."
+      )
+      return
+    }
+
+    const files = response.data.files.filter((file: CompareCommitsFile) => {
       let match = false
       for (const item of filter) {
         const pattern = item
@@ -97,17 +99,15 @@ async function run(): Promise<void> {
       return match
     })
 
-    const all = [] as string[],
-      added = [] as string[],
-      modified = [] as string[],
-      removed = [] as string[],
-      renamed = [] as string[],
-      addedModified = [] as string[],
-      addedModifiedRenamed = [] as string[]
+    const all: string[] = [],
+      added: string[] = [],
+      modified: string[] = [],
+      removed: string[] = [],
+      renamed: string[] = [],
+      addedModified: string[] = [],
+      addedModifiedRenamed: string[] = []
     for (const file of files) {
       const filename = file.filename
-      // If we're using the 'space-delimited' format and any of the filenames have a space in them,
-      // then fail the step.
       if (format === 'space-delimited' && filename.includes(' ')) {
         core.setFailed(
           `One of your files includes a space. Consider using a different output format or removing spaces from your filenames. ` +
@@ -133,7 +133,6 @@ async function run(): Promise<void> {
           renamed.push(filename)
           addedModifiedRenamed.push(filename)
           if (file.patch) {
-            // modified renamed files include a patch field
             modified.push(filename)
             addedModified.push(filename)
           }
@@ -145,7 +144,6 @@ async function run(): Promise<void> {
       }
     }
 
-    // Format the arrays of changed files.
     let allFormatted: string,
       addedFormatted: string,
       modifiedFormatted: string,
@@ -155,7 +153,6 @@ async function run(): Promise<void> {
       addedModifiedRenamedFormatted: string
     switch (format) {
       case 'space-delimited':
-        // If any of the filenames have a space in them, then fail the step.
         for (const file of all) {
           if (file.includes(' '))
             core.setFailed(
@@ -190,7 +187,6 @@ async function run(): Promise<void> {
         break
     }
 
-    // Log the output values.
     core.info(`All: ${allFormatted}`)
     core.info(`Added: ${addedFormatted}`)
     core.info(`Modified: ${modifiedFormatted}`)
@@ -199,7 +195,6 @@ async function run(): Promise<void> {
     core.info(`Added or modified: ${addedModifiedFormatted}`)
     core.info(`Added, modified or renamed: ${addedModifiedRenamedFormatted}`)
 
-    // Set step output context.
     core.setOutput('all', allFormatted)
     core.setOutput('added', addedFormatted)
     core.setOutput('modified', modifiedFormatted)
@@ -211,7 +206,7 @@ async function run(): Promise<void> {
     // For backwards-compatibility
     core.setOutput('deleted', removedFormatted)
   } catch (error) {
-    core.setFailed(error.message)
+    core.setFailed(error instanceof Error ? error.message : String(error))
   }
 }
 
